@@ -1,0 +1,25 @@
+# Render Blueprint: https://render.com/docs/blueprint-spec
+# New > Blueprint > pick this repo. Render will ask for the two API keys (left blank on purpose).
+services:
+  - type: web
+    name: embodied-agent-harness
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn scout.warehouse.server:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      # Required to open the page: https://<your-service>.onrender.com/?token=<value>
+      # Render generates it; read it under the service's Environment tab.
+      - key: DEMO_TOKEN
+        generateValue: true
+      # Paid models appear in the picker only when their key is set. Leave blank for a free-baseline-only demo.
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      # Server-side spend limits that the UI cannot override.
+      - key: MAX_RUN_BUDGET_USD
+        value: "0.25"
+      - key: MAX_TOTAL_SPEND_USD
+        value: "2.00"

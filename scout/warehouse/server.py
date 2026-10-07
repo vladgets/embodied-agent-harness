@@ -8,11 +8,13 @@ duration, so the 3D animation keeps up even with the instant offline baseline.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
+import os
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 
 from scout.harness.trace import Trace
 from scout.warehouse.agent import run_task
@@ -29,6 +31,24 @@ PLAYBACK = 2.0  # default simulated seconds per wall-clock second (the UI can ov
 PHYSICAL = {"navigate_to", "open", "pick", "place", "charge"}
 
 
+# ---- deployment guards (all optional; unset = open, for local development) ----
+def token_ok(provided: str | None) -> bool:
+    """If DEMO_TOKEN is set, every page and socket must present it (?token=...)."""
+    expected = os.environ.get("DEMO_TOKEN")
+    return not expected or (provided is not None and hmac.compare_digest(provided, expected))
+
+
+def run_budget(requested) -> float:
+    """Per-run spend cap: what the UI asks for, never above MAX_RUN_BUDGET_USD (default $0.75)."""
+    ceiling = float(os.environ.get("MAX_RUN_BUDGET_USD", "0.75"))
+    return max(0.01, min(float(requested or ceiling), ceiling))
+
+
+def total_cap() -> float | None:
+    v = os.environ.get("MAX_TOTAL_SPEND_USD")
+    return float(v) if v else None
+
+
 def snapshot(w: Warehouse) -> dict:
     v = w.eval_view()
     return {"t": v["t"], "robot": v["robot"], "objects": list(v["objects"].values()),
@@ -42,6 +62,7 @@ class Hub:
         self.world = Warehouse()
         self.planner = None
         self.run_info: dict = {}
+        self.spent = 0.0  # paid spend by this server process, for MAX_TOTAL_SPEND_USD
 
     async def broadcast(self, msg: dict) -> None:
         text = json.dumps(msg, default=str)
@@ -57,7 +78,8 @@ class Hub:
             est = estimate_run_cost(m["id"])
             models.append(m | {"est_run_usd": est})
         running = bool(self.task and not self.task.done())
-        return {"type": "hello", "running": running, "run": self.run_info if running else None, "models": models,
+        limits = {"max_run_usd": run_budget(None), "max_total_usd": total_cap(), "spent_usd": round(self.spent, 4)}
+        return {"type": "hello", "limits": limits, "running": running, "run": self.run_info if running else None, "models": models,
                 "tasks": [{"id": t.id, "level": t.level, "instruction": t.instruction, "has_goals": bool(t.goals)}
                           for t in TASKS],
                 "static": {"rooms": ROOMS, "charger": CHARGER}, "snapshot": snapshot(self.world)}
@@ -94,7 +116,11 @@ class Hub:
         else:
             task = task if task and instruction == task.instruction else None
         spec = get_spec(model)
+        self.planner = None
         try:
+            cap = total_cap()
+            if spec.provider != "baseline" and cap is not None and self.spent >= cap:
+                raise ValueError(f"This server's spend cap (${cap:.2f}) is used up. Use the free baseline, or restart the service.")
             if not instruction:
                 raise ValueError("Enter an instruction or pick a task.")
             if spec.provider == "baseline" and not (task and task.goals):
@@ -106,7 +132,7 @@ class Hub:
                              user_reply=lambda q: "Operator: no preference. Do not move heavy items; use your best judgment.")
             self.planner = make_planner(model, goals=task.goals if task else None,
                                         effort=msg.get("effort") or None,
-                                        budget_usd=float(msg.get("budget_usd") or 0.75) if spec.provider != "baseline" else None)
+                                        budget_usd=run_budget(msg.get("budget_usd")) if spec.provider != "baseline" else None)
             playback = max(0.5, min(float(msg.get("speed") or PLAYBACK), 16.0))
             state = {"log": 0, "t": w.t}
             self.run_info = {"model": model, "instruction": instruction}
@@ -140,19 +166,33 @@ class Hub:
             await self.broadcast({"type": "error", "message": f"Stopped: {e}", "usage": self.usage_msg()})
         except Exception as e:  # surface API/auth/validation errors to the UI instead of dying silently
             await self.broadcast({"type": "error", "message": f"{type(e).__name__}: {e}"})
+        finally:
+            u = getattr(self.planner, "usage", None)
+            if u is not None and hasattr(self.planner, "spec"):
+                self.spent += u.cost_usd(self.planner.spec) or 0.0
 
 
 hub = Hub()
 app = FastAPI()
 
 
+@app.get("/health")
+async def health():
+    return {"ok": True}
+
+
 @app.get("/")
-async def index():
+async def index(token: str | None = None):
+    if not token_ok(token):
+        return PlainTextResponse("Unauthorized: open the link with ?token=...", status_code=401)
     return FileResponse(WEB / "warehouse.html")
 
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
+    if not token_ok(ws.query_params.get("token")):
+        await ws.close(code=4401)
+        return
     await ws.accept()
     hub.clients.add(ws)
     await ws.send_text(json.dumps(hub.hello(), default=str))

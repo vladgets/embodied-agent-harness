@@ -31,7 +31,7 @@ implementation of those two ideas plus measurement around them. It is not their 
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-.venv/bin/python -m pytest -q                       # 24 tests, no network, no keys
+.venv/bin/python -m pytest -q                       # 29 tests, no network, no keys
 
 .venv/bin/uvicorn scout.warehouse.server:app --port 8001
 # open http://localhost:8001
@@ -66,6 +66,26 @@ python -m scout.warehouse.evals --model gpt-5.4-mini --seeds 2 --yes    # real r
 - Results append to `runs/evals/<model>.jsonl`; re-running skips finished runs.
 - Token usage and cost are logged per run. Prices live in `scout/warehouse/models.py`
   (override or add models in an untracked `models.local.json`).
+
+## Deploying (Render)
+
+`render.yaml` is a Blueprint for a single web service. In Render: **New > Blueprint**, pick this repo
+(grant Render access to it if it is private), and fill in the API keys, or leave them blank for a
+free-baseline-only demo. Then open `https://<service>.onrender.com/?token=<DEMO_TOKEN>`; Render generates
+the token, and you can read it on the service's Environment tab.
+
+Because anyone with the URL could otherwise spend your API credit, the server has guards, all set by
+environment variables (unset means open, which is what you want locally):
+
+| Variable | Effect |
+|---|---|
+| `DEMO_TOKEN` | Page and WebSocket both require `?token=...`; `/health` stays open for Render |
+| `MAX_RUN_BUDGET_USD` | Ceiling on any single run; the UI's budget field cannot exceed it |
+| `MAX_TOTAL_SPEND_USD` | Once this process has spent that much, paid models are refused until restart |
+
+Notes: the free plan sleeps when idle (first request takes a while to wake it), keeps state in memory
+(restarting resets the spend counter), and all visitors share one simulated world, so use it for demos,
+not concurrent users. The deploy config is untested on Render itself; it was validated locally only.
 
 ## Honest status and limitations
 

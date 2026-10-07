@@ -365,6 +365,7 @@ function handle(m) {
       fillModels(); if (!$('task').options.length) fillTasks();
       clearWorld(); buildStatic(m.snapshot); lastSnap = null; motion = null; applySnapshot(m.snapshot);
       for (const o of Object.values(objMeshes)) o.position.copy(o.userData.target);
+      if (m.limits) $('cNote').textContent = `server caps: $${m.limits.max_run_usd.toFixed(2)}/run` + (m.limits.max_total_usd ? `, $${m.limits.max_total_usd.toFixed(2)} total ($${m.limits.spent_usd.toFixed(2)} used)` : '');
       renderPlan([]); renderVerdict(null); $('brief').textContent = '–'; setUsage({ tokens_in: 0, tokens_out: 0, cache_read: 0, cost_usd: 0 }); $('log').innerHTML = ''; $('hmodel').textContent = 'idle'; setRunning(false);
       if (m.running && m.run) { setRunning(true); $('hmodel').textContent = m.run.model; log('task', '▶ ' + esc(m.run.instruction) + '  (joined mid-run)'); }
       break;
@@ -388,7 +389,8 @@ function handle(m) {
 }
 
 function connect() {
-  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+  const tok = new URLSearchParams(location.search).get('token');
+  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws' + (tok ? '?token=' + encodeURIComponent(tok) : ''));
   ws.onmessage = e => handle(JSON.parse(e.data));
   ws.onclose = () => { toast('connection lost, retrying…', 'bad'); setTimeout(connect, 1500); };
 }
