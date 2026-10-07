@@ -8,7 +8,7 @@ from pathlib import Path
 
 class Trace:
     def __init__(self, directory: str = "runs", name: str | None = None):
-        Path(directory).mkdir(exist_ok=True)
+        Path(directory).mkdir(parents=True, exist_ok=True)  # nested dirs like runs/ui; runs/ is git-ignored
         self.path = Path(directory) / f"{name or time.strftime('%Y%m%d-%H%M%S')}.jsonl"
         self.records: list[dict] = []
 
