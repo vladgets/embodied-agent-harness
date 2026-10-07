@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+.env
+.env.*
+*.log
+.DS_Store
+
+# run artifacts: traces and eval results (can be large, contain model transcripts)
+runs/
+
+# local overrides (model prices / extra model ids)
+models.local.json

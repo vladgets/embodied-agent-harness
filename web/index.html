@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scout Fleet Console</title>
+<style>
+  :root { --bg:#070b10; --panel:#0d141c; --line:#1b2a38; --fg:#c9d6e2; --dim:#6b8294; --acc:#3dd6c6; --warn:#ffb454; --bad:#ff5c6c; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg); font:13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; overflow:hidden; }
+  #app { display:grid; grid-template-columns: 1fr 380px; height:100%; }
+  #view { position:relative; }
+  canvas { display:block; }
+  #hud { position:absolute; top:12px; left:14px; pointer-events:none; color:var(--dim); text-shadow:0 0 8px #000; }
+  #hud b { color:var(--acc); }
+  #side { background:var(--panel); border-left:1px solid var(--line); display:flex; flex-direction:column; min-height:0; }
+  h2 { margin:0; padding:10px 14px; font-size:11px; letter-spacing:.14em; text-transform:uppercase; color:var(--dim); border-bottom:1px solid var(--line); }
+  #robots { padding:8px 14px; display:grid; gap:6px; }
+  .rb { display:grid; grid-template-columns: 70px 1fr auto; gap:8px; align-items:center; }
+  .rb .bar { height:5px; background:var(--line); border-radius:3px; overflow:hidden; }
+  .rb .bar i { display:block; height:100%; background:var(--acc); }
+  .rb.off { opacity:.55; } .rb.off .nm { color:var(--bad); }
+  .rb button { background:none; border:1px solid var(--line); color:var(--dim); border-radius:4px; font:inherit; font-size:11px; cursor:pointer; padding:1px 6px; }
+  .rb button:hover { border-color:var(--bad); color:var(--bad); }
+  #log { flex:1; overflow:auto; padding:8px 14px; min-height:0; }
+  .m { margin:0 0 8px; padding-left:8px; border-left:2px solid var(--line); white-space:pre-wrap; word-break:break-word; }
+  .m.order { border-color:var(--acc); color:#fff; }
+  .m.thought { color:var(--dim); font-style:italic; }
+  .m.tool { border-color:#4f8cff; } .m.tool.err { border-color:var(--bad); }
+  .m.tool .res { color:var(--dim); } .m.tool.err .res { color:var(--bad); }
+  .m.event { border-color:var(--warn); color:var(--warn); }
+  .m.done { border-color:var(--acc); color:var(--acc); }
+  form { display:flex; gap:8px; padding:10px 14px; border-top:1px solid var(--line); }
+  input { flex:1; background:#05090d; color:var(--fg); border:1px solid var(--line); border-radius:4px; padding:8px 10px; font:inherit; }
+  input:focus { outline:none; border-color:var(--acc); }
+  .btn { background:var(--acc); color:#04120f; border:0; border-radius:4px; padding:0 14px; font:inherit; font-weight:700; cursor:pointer; }
+  .chips { padding:0 14px 10px; display:flex; flex-wrap:wrap; gap:6px; }
+  .chip { background:none; border:1px solid var(--line); color:var(--dim); border-radius:12px; padding:2px 9px; font:inherit; font-size:11px; cursor:pointer; }
+  .chip:hover { border-color:var(--acc); color:var(--acc); }
+  @media (max-width: 800px) { #app { grid-template-columns: 1fr; grid-template-rows: 55% 45%; } }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="view"><div id="hud">SCOUT FLEET CONSOLE · <b id="planner">…</b> · t=<span id="clock">0.0</span>s · <span id="cams">drag to orbit · scroll to zoom · <u style="pointer-events:auto;cursor:pointer" id="topdown">top-down</u></span></div></div>
+  <div id="side">
+    <h2>Fleet</h2><div id="robots"></div>
+    <h2>Agent feed</h2><div id="log"></div>
+    <div class="chips" id="chips"></div>
+    <div class="chips"><button class="chip" id="reset">↺ reset world</button></div>
+    <form id="form"><input id="order" placeholder="Give an order…" autocomplete="off"><button class="btn">SEND</button></form>
+  </div>
+</div>
+
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const view = document.getElementById('view');
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x070b10);
+scene.fog = new THREE.FogExp2(0x070b10, 0.0075);
+const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 600);
+camera.position.set(-70, 70, 80);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+view.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0, 0); controls.enableDamping = true; controls.maxPolarAngle = Math.PI * 0.48;
+
+scene.add(new THREE.AmbientLight(0x6688aa, 0.8));
+const sun = new THREE.DirectionalLight(0xbfe9ff, 1.1); sun.position.set(-40, 80, 30); scene.add(sun);
+
+const W = (x, y, z) => new THREE.Vector3(x, z, -y);   // world (x,y,height) -> three
+let terrainMesh, colorAttr, cellOf = [], heights, N = 100, SIZE = 100;
+const DIM = new THREE.Color(0x0e1c26), LIT = new THREE.Color(0x2f8f86);
+
+async function buildTerrain() {
+  const t = await (await fetch('/terrain')).json();
+  N = t.n; SIZE = t.size; heights = t.heights;
+  const g = new THREE.PlaneGeometry(SIZE, SIZE, N, N); g.rotateX(-Math.PI / 2);
+  const pos = g.attributes.position, cols = new Float32Array(pos.count * 3);
+  for (let k = 0; k < pos.count; k++) {
+    const i = k % (N + 1), j = Math.floor(k / (N + 1));       // j runs from +y (top) down to -y
+    pos.setY(k, heights[N - j][i]);
+    const wx = pos.getX(k), wy = -pos.getZ(k);
+    cellOf.push([Math.floor((wx + 50) / 5), Math.floor((wy + 50) / 5)]);
+    cols.set(DIM.toArray(), k * 3);
+  }
+  g.setAttribute('color', new THREE.BufferAttribute(cols, 3)); colorAttr = g.attributes.color;
+  g.computeVertexNormals();
+  terrainMesh = new THREE.Mesh(g, new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: 0.95 }));
+  scene.add(terrainMesh);
+  const wire = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: 0x3dd6c6, wireframe: true, transparent: true, opacity: 0.07 }));
+  wire.position.y = 0.05; scene.add(wire);
+}
+
+// static markers
+function ring(r, color, y = 0.3) {
+  const m = new THREE.Mesh(new THREE.RingGeometry(r - 0.2, r, 64), new THREE.MeshBasicMaterial({ color, side: THREE.DoubleSide, transparent: true, opacity: 0.8 }));
+  m.rotation.x = -Math.PI / 2; m.position.y = y; return m;
+}
+const noGoGroup = new THREE.Group(), homeMark = new THREE.Group(); scene.add(noGoGroup, homeMark);
+
+const robotObjs = {}, targetObjs = {};
+function makeRobot(id) {
+  const g = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.ConeGeometry(1.1, 3, 4), new THREE.MeshStandardMaterial({ color: 0x3dd6c6, emissive: 0x145a52 }));
+  body.rotation.x = Math.PI / 2; body.position.y = 1.2; g.add(body);
+  const rng = ring(1, 0x3dd6c6, 0.4); g.add(rng);
+  const beam = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 40, 6), new THREE.MeshBasicMaterial({ color: 0xff5c6c, transparent: true, opacity: 0 }));
+  beam.position.y = 20; g.add(beam);
+  const label = makeLabel(id); label.position.y = 5; g.add(label);
+  const trail = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: 0x3dd6c6, transparent: true, opacity: 0.5 }));
+  const goalLine = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineDashedMaterial({ color: 0xffb454, dashSize: 1.2, gapSize: 0.8 }));
+  scene.add(g, trail, goalLine);
+  return { g, body, rng, beam, trail, goalLine, pts: [] };
+}
+function makeLabel(text) {
+  const c = document.createElement('canvas'); c.width = 128; c.height = 40;
+  const x = c.getContext('2d'); x.font = 'bold 22px monospace'; x.fillStyle = '#c9d6e2'; x.textAlign = 'center'; x.fillText(text, 64, 28);
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), transparent: true, depthTest: false }));
+  s.scale.set(8, 2.5, 1); return s;
+}
+function makeTarget(id) {
+  const g = new THREE.Group();
+  const m = new THREE.Mesh(new THREE.OctahedronGeometry(1.1), new THREE.MeshStandardMaterial({ color: 0x555f66, emissive: 0x111111 }));
+  m.position.y = 1.6; g.add(m);
+  const pulse = ring(1.5, 0xff5c6c, 0.4); pulse.visible = false; g.add(pulse);
+  scene.add(g); return { g, m, pulse };
+}
+
+// state handling
+let lastExplored = -1, first = true;
+function applyState(s) {
+  document.getElementById('clock').textContent = s.t.toFixed(1);
+  if (first) {
+    first = false;
+    s.no_go.forEach(([x, y, r]) => {
+      const cyl = new THREE.Mesh(new THREE.CylinderGeometry(r, r, 14, 48, 1, true), new THREE.MeshBasicMaterial({ color: 0xff5c6c, transparent: true, opacity: 0.12, side: THREE.DoubleSide, depthWrite: false }));
+      const c = W(x, y, 5); cyl.position.copy(c); noGoGroup.add(cyl);
+      const rg = ring(r, 0xff5c6c, 0.5); rg.position.set(x, 0.5 + 3, -y); noGoGroup.add(rg);
+    });
+    const h = ring(3, 0xffffff, 0.4); h.position.set(s.home[0], heightAt(s.home[0], s.home[1]) + 0.4, -s.home[1]); homeMark.add(h);
+  }
+  s.robots.forEach(r => {
+    const o = robotObjs[r.id] ??= makeRobot(r.id);
+    const p = W(r.x, r.y, r.z);
+    o.g.position.lerp(p, 0.5);
+    o.g.rotation.y = r.heading + Math.PI / 2;   // cone points +z; world heading is atan2(dy,dx)
+    o.rng.scale.setScalar(r.range); o.rng.material.opacity = r.comms_up ? 0.35 : 0.1;
+    const col = !r.comms_up ? 0xff5c6c : r.mode === 'holding' ? 0xffb454 : 0x3dd6c6;
+    o.body.material.color.setHex(col); o.body.material.emissive.setHex(col).multiplyScalar(0.3);
+    o.rng.material.color.setHex(col);
+    o.beam.material.opacity = r.comms_up ? 0 : 0.5;
+    if (!o.pts.length || o.pts.at(-1).distanceTo(p) > 0.8) { o.pts.push(p.clone().add(new THREE.Vector3(0, 0.5, 0))); if (o.pts.length > 160) o.pts.shift(); o.trail.geometry.setFromPoints(o.pts); }
+    if (r.goal) {
+      o.goalLine.geometry.setFromPoints([p.clone().add(new THREE.Vector3(0, 1, 0)), W(r.goal[0], r.goal[1], heightAt(r.goal[0], r.goal[1]) + 1)]);
+      o.goalLine.computeLineDistances(); o.goalLine.visible = true;
+    } else o.goalLine.visible = false;
+  });
+  s.targets.forEach(t => {
+    const o = targetObjs[t.id] ??= makeTarget(t.id);
+    o.g.position.lerp(W(t.x, t.y, t.z), 0.5);
+    o.m.rotation.y += 0.04;
+    o.m.material.color.setHex(t.detected ? 0xff5c6c : 0x555f66);
+    o.m.material.emissive.setHex(t.detected ? 0x661a22 : 0x111111);
+    o.pulse.visible = t.detected;
+    if (t.detected) o.pulse.scale.setScalar(1 + (performance.now() % 1200) / 1200 * 2.5);
+  });
+  if (colorAttr && s.explored.length !== lastExplored) {
+    lastExplored = s.explored.length;
+    const seen = new Set(s.explored.map(([i, j]) => i + ',' + j));
+    for (let k = 0; k < cellOf.length; k++) {
+      const [i, j] = cellOf[k];
+      const c = seen.has(i + ',' + j) ? LIT : DIM;
+      colorAttr.setXYZ(k, c.r, c.g, c.b);
+    }
+    colorAttr.needsUpdate = true;
+  }
+  renderRobots(s.robots);
+}
+function heightAt(x, y) {
+  if (!heights) return 0;
+  const i = Math.max(0, Math.min(N, Math.round((x + 50) / SIZE * N))), j = Math.max(0, Math.min(N, Math.round((y + 50) / SIZE * N)));
+  return heights[j][i];
+}
+
+// side panel
+const robotsEl = document.getElementById('robots');
+function renderRobots(rs) {
+  robotsEl.innerHTML = rs.map(r => `
+    <div class="rb ${r.comms_up ? '' : 'off'}">
+      <span class="nm">${r.id}</span>
+      <span><div class="bar"><i style="width:${r.battery}%"></i></div><small style="color:var(--dim)">${r.comms_up ? r.mode : 'NO COMMS'} ${r.last_cmd ? '· ' + r.last_cmd : ''}</small></span>
+      <button data-r="${r.id}" data-k="${r.comms_up ? 'comms_loss' : 'comms_restore'}">${r.comms_up ? 'kill comms' : 'restore'}</button>
+    </div>`).join('');
+}
+robotsEl.addEventListener('click', e => {
+  const b = e.target.closest('button'); if (b) ws.send(JSON.stringify({ type: 'fault', robot: b.dataset.r, kind: b.dataset.k }));
+});
+const logEl = document.getElementById('log');
+function log(cls, html) {
+  const d = document.createElement('div'); d.className = 'm ' + cls; d.innerHTML = html;
+  logEl.appendChild(d); logEl.scrollTop = logEl.scrollHeight;
+}
+const esc = s => String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+function handle(m) {
+  switch (m.type) {
+    case 'state': applyState(m); break;
+    case 'reset':
+      Object.values(robotObjs).forEach(o => { o.pts = []; o.trail.geometry.setFromPoints([]); });
+      lastExplored = -1; logEl.innerHTML = ''; log('event', 'world reset'); break;
+    case 'planner': document.getElementById('planner').textContent = m.kind === 'claude' ? 'CLAUDE AGENT' : 'SCRIPTED PLANNER'; break;
+    case 'order': log('order', '▶ ' + esc(m.text)); break;
+    case 'thought': log('thought', esc(m.text)); break;
+    case 'tool': {
+      const ok = m.result.ok;
+      log('tool' + (ok ? '' : ' err'), `<b>${m.name}</b>(${esc(JSON.stringify(m.input))})<div class="res">${ok ? '✓' : '✗'} ${esc(ok ? JSON.stringify(m.result) : m.result.error)}</div>`);
+      break;
+    }
+    case 'event': log('event', m.kind === 'detection' ? `◉ ${m.robot} detected ${m.target} at (${m.x}, ${m.y})` : m.kind === 'arrived' ? `⚑ ${m.robot} arrived` : `⚠ ${m.fault} on ${m.robot}`); break;
+    case 'done': log('done', m.clarification ? '? ' + esc(m.clarification) : '■ ' + esc(m.report || 'finished')); break;
+  }
+}
+
+const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+ws.onmessage = e => handle(JSON.parse(e.data));
+ws.onclose = () => log('event', 'connection lost');
+
+const chips = ['Send two scouts to the ridge', 'Send alpha to 10,15', 'Send everyone to the east', 'Go look around'];
+const chipsEl = document.getElementById('chips');
+chips.forEach(c => { const b = document.createElement('button'); b.className = 'chip'; b.textContent = c; b.onclick = () => send(c); chipsEl.appendChild(b); });
+function send(text) { if (text.trim()) ws.send(JSON.stringify({ type: 'order', text })); }
+document.getElementById('form').addEventListener('submit', e => { e.preventDefault(); const i = document.getElementById('order'); send(i.value); i.value = ''; });
+document.getElementById('reset').onclick = () => ws.send(JSON.stringify({ type: 'reset' }));
+document.getElementById('topdown').onclick = () => { camera.position.set(0, 140, 0.01); controls.target.set(0, 0, 0); };
+
+function resize() { const w = view.clientWidth, h = view.clientHeight; renderer.setSize(w, h); camera.aspect = w / h; camera.updateProjectionMatrix(); }
+addEventListener('resize', resize); resize();
+buildTerrain();
+(function loop() { requestAnimationFrame(loop); controls.update(); renderer.render(scene, camera); })();
+</script>
+</body>
+</html>

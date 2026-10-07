@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Warehouse Agent Console</title>
+<style>
+  :root { --bg:#070b10; --panel:#0d141c; --line:#1b2a38; --fg:#c9d6e2; --dim:#6b8294; --acc:#3dd6c6; --warn:#ffb454; --bad:#ff5c6c; --ok:#5fd68a; --blue:#4f8cff; }
+  * { box-sizing:border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg); font:12.5px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; overflow:hidden; }
+  #app { display:grid; grid-template-columns: 1fr 430px; height:100%; }
+  #view { position:relative; min-width:0; }
+  canvas { display:block; }
+  #hud { position:absolute; top:12px; left:14px; color:var(--dim); text-shadow:0 0 8px #000; pointer-events:none; }
+  #hud b { color:var(--acc); } #hud u { cursor:pointer; pointer-events:auto; }
+  #toast { position:absolute; left:50%; bottom:18px; transform:translateX(-50%); background:#0d141cee; border:1px solid var(--line); border-radius:6px; padding:8px 14px; max-width:70%; display:none; }
+  #toast.bad { border-color:var(--bad); color:var(--bad); } #toast.ok { border-color:var(--ok); color:var(--ok); }
+  #side { background:var(--panel); border-left:1px solid var(--line); overflow-y:auto; min-height:0; }
+  details { border-bottom:1px solid var(--line); } summary { cursor:pointer; padding:9px 14px; font-size:11px; letter-spacing:.14em; text-transform:uppercase; color:var(--dim); user-select:none; }
+  .sec { padding:4px 14px 12px; }
+  label { display:block; color:var(--dim); font-size:11px; margin:8px 0 3px; }
+  select, input[type=text], input[type=number], textarea { width:100%; background:#05090d; color:var(--fg); border:1px solid var(--line); border-radius:4px; padding:6px 8px; font:inherit; }
+  textarea { resize:vertical; min-height:46px; }
+  select:focus, input:focus, textarea:focus { outline:none; border-color:var(--acc); }
+  .row { display:flex; gap:8px; } .row > * { flex:1; }
+  .btn { background:var(--acc); color:#04120f; border:0; border-radius:4px; padding:8px 12px; font:inherit; font-weight:700; cursor:pointer; }
+  .btn.sec2 { background:none; color:var(--fg); border:1px solid var(--line); font-weight:400; } .btn:disabled { opacity:.4; cursor:default; }
+  .small { font-size:11px; color:var(--dim); } .warn { color:var(--warn); }
+  .meter { display:grid; grid-template-columns:repeat(4,1fr); gap:6px; margin-top:4px; }
+  .meter div { background:#05090d; border:1px solid var(--line); border-radius:4px; padding:5px 7px; } .meter b { display:block; font-size:14px; color:var(--fg); } .meter span { font-size:10px; color:var(--dim); }
+  #plan div { padding:2px 0; display:flex; gap:8px; } #plan .st { width:14px; text-align:center; }
+  .todo .st { color:var(--dim); } .doing .st { color:var(--warn); } .done .st { color:var(--ok); } .done .tx { color:var(--dim); text-decoration:line-through; } .blocked .st { color:var(--bad); }
+  #verdict { border:1px solid var(--line); border-radius:4px; padding:7px 9px; background:#05090d; min-height:48px; }
+  #verdict.success { border-color:var(--ok); } #verdict.failure { border-color:var(--bad); }
+  #verdict .s { font-weight:700; } #verdict.success .s { color:var(--ok); } #verdict.failure .s { color:var(--bad); }
+  pre { margin:0; white-space:pre-wrap; word-break:break-word; color:var(--fg); font:inherit; background:#05090d; border:1px solid var(--line); border-radius:4px; padding:7px 9px; max-height:260px; overflow:auto; }
+  #log { max-height:300px; overflow:auto; }
+  .m { margin:0 0 6px; padding-left:8px; border-left:2px solid var(--line); white-space:pre-wrap; word-break:break-word; }
+  .m.task { border-color:var(--acc); color:#fff; } .m.thought { color:var(--dim); font-style:italic; } .m.tool { border-color:var(--blue); } .m.tool.bad { border-color:var(--bad); }
+  .m .res { color:var(--dim); } .m.tool.bad .res { color:var(--bad); } .m.done { border-color:var(--ok); color:var(--ok); } .m.err { border-color:var(--bad); color:var(--bad); }
+  @media (max-width:900px){ #app{ grid-template-columns:1fr; grid-template-rows:50% 50%; } }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="view">
+    <div id="hud">WAREHOUSE AGENT · <b id="hmodel">idle</b> · sim t=<span id="clock">0</span>s · <u id="vIso">iso</u> · <u id="vTop">top-down</u></div>
+    <div id="toast"></div>
+  </div>
+  <div id="side">
+    <details open><summary>Run configuration</summary><div class="sec">
+      <label>Model</label><select id="model"></select>
+      <div class="small" id="modelNote"></div>
+      <div class="row"><div><label>Effort</label><select id="effort"></select></div><div><label>Run budget (USD cap)</label><input type="number" id="budget" value="0.25" step="0.05" min="0.01"></div></div>
+      <label>Task</label><select id="task"></select>
+      <label>Instruction</label><textarea id="instr"></textarea>
+      <div class="row"><div><label>Seed</label><input type="number" id="seed" value="0" min="0"></div><div><label>Evaluator false-success %</label><input type="number" id="fs" value="0" min="0" max="100" step="5"></div></div>
+      <label>Playback speed (1× = real time)</label><select id="speed"><option value="1">1× real time</option><option value="2" selected>2×</option><option value="4">4×</option><option value="8">8×</option></select>
+      <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="useEval" checked style="width:auto"> evaluator on (off = open-loop ablation)</label>
+      <div class="row" style="margin-top:10px"><button class="btn" id="run">Run</button><button class="btn sec2" id="stop" disabled>Stop</button><button class="btn sec2" id="reset">Reset</button></div>
+    </div></details>
+    <details open><summary>Cost</summary><div class="sec"><div class="meter">
+      <div><b id="cIn">0</b><span>input tok</span></div><div><b id="cOut">0</b><span>output tok</span></div><div><b id="cCache">0</b><span>cached tok</span></div><div><b id="cUsd">$0.000</b><span>spent</span></div></div>
+      <div class="small" id="cNote"></div></div></details>
+    <details open><summary>Agent plan</summary><div class="sec"><div id="plan" class="small">(no plan yet)</div></div></details>
+    <details open><summary>Evaluator verdict (last action)</summary><div class="sec"><div id="verdict" class="small">–</div></div></details>
+    <details open><summary>Scene graph (agent's memory)</summary><div class="sec"><pre id="brief">–</pre></div></details>
+    <details open><summary>Feed</summary><div class="sec"><div id="log"></div></div></details>
+  </div>
+</div>
+
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+const $ = id => document.getElementById(id);
+
+/* ---------- scene ---------- */
+const view = $('view');
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x070b10);
+scene.fog = new THREE.Fog(0x070b10, 90, 170);
+const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 400);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+view.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true; controls.maxPolarAngle = Math.PI * 0.49;
+const setCam = (p, t = [0, 0, 0]) => { camera.position.set(...p); controls.target.set(...t); };
+setCam([0, 74, 50]);
+scene.add(new THREE.AmbientLight(0x8aa4c0, 0.9));
+const sun = new THREE.DirectionalLight(0xdff3ff, 1.0); sun.position.set(-30, 60, 25); scene.add(sun);
+const P = (x, y, h = 0) => new THREE.Vector3(x - 30, h, y - 14);   // world (x,y) -> three; z = y
+const COLORS = { red: 0xd9534f, blue: 0x4f8cff, yellow: 0xe5c100, white: 0xf2f2f2, black: 0x222a33, gray: 0x9aa5b1, green: 0x4caf50 };
+const ROOMCOL = { storage: 0x16222c, packing: 0x1a2630, dock: 0x1f2a24, office: 0x221f2c, charging: 0x2a2620 };
+
+function label(text, scale = 1) {
+  const c = document.createElement('canvas'); c.width = 256; c.height = 64;
+  const x = c.getContext('2d'); x.font = 'bold 30px monospace'; x.fillStyle = '#c9d6e2'; x.textAlign = 'center'; x.fillText(text, 128, 42);
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), transparent: true, depthTest: false }));
+  s.scale.set(5 * scale, 1.25 * scale, 1); s.renderOrder = 10; return s;
+}
+const matte = (c, extra = {}) => new THREE.MeshStandardMaterial({ color: c, roughness: 0.8, metalness: 0.05, ...extra });
+
+/* ---------- world objects ---------- */
+let staticGroup = new THREE.Group(); scene.add(staticGroup);
+const doorMeshes = {}, contMeshes = {}, objMeshes = {};
+let robot = null, lastSnap = null, rooms = null;
+
+function clearWorld() {
+  scene.remove(staticGroup); staticGroup = new THREE.Group(); scene.add(staticGroup);
+  for (const m of [doorMeshes, contMeshes, objMeshes]) for (const k of Object.keys(m)) delete m[k];
+  robot = null;
+}
+
+function buildStatic(snap) {
+  for (const [name, [x0, y0, x1, y1]] of Object.entries(rooms)) {
+    const f = new THREE.Mesh(new THREE.PlaneGeometry(x1 - x0, y1 - y0), matte(ROOMCOL[name] || 0x182029));
+    f.rotation.x = -Math.PI / 2; f.position.copy(P((x0 + x1) / 2, (y0 + y1) / 2, 0));
+    staticGroup.add(f);
+    const l = label(name.toUpperCase(), 1.3); l.position.copy(P(x0 + 4.5, y0 + 1.3, 0.2)); staticGroup.add(l);
+    const g = new THREE.GridHelper(Math.max(x1 - x0, y1 - y0), Math.max(x1 - x0, y1 - y0) / 2, 0x24384a, 0x1a2a38);
+    g.scale.set((x1 - x0) / Math.max(x1 - x0, y1 - y0), 1, (y1 - y0) / Math.max(x1 - x0, y1 - y0));
+    g.position.copy(P((x0 + x1) / 2, (y0 + y1) / 2, 0.02)); g.material.transparent = true; g.material.opacity = 0.35; staticGroup.add(g);
+  }
+  // walls: dedupe shared edges, cut a 3m gap at every door
+  const segs = new Map();
+  for (const [, [x0, y0, x1, y1]] of Object.entries(rooms))
+    for (const s of [[x0, y0, x1, y0], [x0, y1, x1, y1], [x0, y0, x0, y1], [x1, y0, x1, y1]]) segs.set(s.join(','), s);
+  const wallMat = matte(0x3a5266, { transparent: true, opacity: 0.88 });
+  for (const [ax, ay, bx, by] of segs.values()) {
+    const horiz = ay === by, c = horiz ? ay : ax, lo = horiz ? ax : ay, hi = horiz ? bx : by;
+    const gaps = snap.doors.filter(d => horiz ? (Math.abs(d.y - c) < 0.01 && d.x >= lo && d.x <= hi) : (Math.abs(d.x - c) < 0.01 && d.y >= lo && d.y <= hi))
+      .map(d => (horiz ? d.x : d.y)).sort((p, q) => p - q);
+    let cur = lo; const pieces = [];
+    for (const g of gaps) { pieces.push([cur, g - 1.5]); cur = g + 1.5; } pieces.push([cur, hi]);
+    for (const [s0, s1] of pieces) if (s1 - s0 > 0.05) {
+      const w = new THREE.Mesh(new THREE.BoxGeometry(horiz ? s1 - s0 : 0.3, 2.2, horiz ? 0.3 : s1 - s0), wallMat);
+      w.position.copy(horiz ? P((s0 + s1) / 2, c, 1.1) : P(c, (s0 + s1) / 2, 1.1)); staticGroup.add(w);
+    }
+  }
+  // charger pad
+  const ch = new THREE.Mesh(new THREE.CylinderGeometry(1.6, 1.6, 0.08, 32), new THREE.MeshStandardMaterial({ color: 0xffb454, emissive: 0x6a4a10 }));
+  ch.position.copy(P(30, 25, 0.05)); staticGroup.add(ch);
+  const cl = label('CHARGER', 0.8); cl.position.copy(P(30, 25, 2)); staticGroup.add(cl);
+  for (const d of snap.doors) makeDoor(d);
+  for (const c of snap.containers) makeContainer(c);
+  robot = makeRobot();
+}
+
+function makeDoor(d) {
+  const vertical = Object.values(rooms).some(r => r[0] === d.x || r[2] === d.x);
+  const m = new THREE.Mesh(new THREE.BoxGeometry(vertical ? 0.25 : 3, 2.2, vertical ? 3 : 0.25), matte(0xffb454, { transparent: true, opacity: 0.9, emissive: 0x201400 }));
+  m.position.copy(P(d.x, d.y, 1.1)); m.userData = { baseY: 1.1, targetY: 1.1 };
+  const l = label(d.id, 0.6); l.position.set(0, 2.3, 0); m.add(l);
+  staticGroup.add(m); doorMeshes[d.id] = m;
+}
+
+const SURF = { table: 1.0, shelf: 1.25, bin: 0.35, cabinet: 0.45 };
+function makeContainer(c) {
+  const g = new THREE.Group(); g.position.copy(P(c.x, c.y, 0));
+  const body = matte(0x56708a), dark = matte(0x2b3b4a);
+  const add = (geo, mat, x, y, z) => { const m = new THREE.Mesh(geo, mat); m.position.set(x, y, z); g.add(m); return m; };
+  g.userData = { kind: c.kind, parts: {} };
+  if (c.kind === 'table') {
+    add(new THREE.BoxGeometry(3.4, 0.15, 1.9), body, 0, 1.0, 0);
+    for (const [x, z] of [[-1.5, -0.8], [1.5, -0.8], [-1.5, 0.8], [1.5, 0.8]]) add(new THREE.BoxGeometry(0.15, 1, 0.15), dark, x, 0.5, z);
+  } else if (c.kind === 'shelf') {
+    for (const y of [0.15, 1.15, 2.1]) add(new THREE.BoxGeometry(3.4, 0.12, 1.2), body, 0, y, 0);
+    for (const [x, z] of [[-1.6, -0.5], [1.6, -0.5], [-1.6, 0.5], [1.6, 0.5]]) add(new THREE.BoxGeometry(0.1, 2.2, 0.1), dark, x, 1.1, z);
+  } else if (c.kind === 'bin') {
+    add(new THREE.BoxGeometry(2.4, 1.2, 1.9), matte(0x6b86a0, { transparent: true, opacity: 0.4 }), 0, 0.6, 0);
+    const lid = new THREE.Group(); lid.position.set(0, 1.2, -0.95);
+    const lm = new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.1, 1.9), matte(0x8aa4bd)); lm.position.set(0, 0, 0.95); lid.add(lm); g.add(lid); g.userData.parts.lid = lid;
+  } else if (c.kind === 'cabinet') {
+    add(new THREE.BoxGeometry(2.2, 2.8, 1.3), matte(0x4b5f73, { transparent: true, opacity: 0.55 }), 0, 1.4, 0);
+    const door = new THREE.Group(); door.position.set(-1.1, 1.4, 0.66);
+    const dm = new THREE.Mesh(new THREE.BoxGeometry(2.2, 2.8, 0.08), matte(0x7f95aa)); dm.position.set(1.1, 0, 0); door.add(dm); g.add(door); g.userData.parts.door = door;
+  }
+  const l = label(c.id, 0.7); l.position.set(0, 3.3, 0); g.add(l);
+  staticGroup.add(g); contMeshes[c.id] = g;
+}
+
+const DIMS = { box: [1, 0.8, 1], crate: [1.8, 1.6, 1.8], vase: [0.6, 1.0, 0.6], keycard: [0.8, 0.08, 0.5], wrench: [1.2, 0.15, 0.3] };
+function makeObject(o) {
+  const [w, h, d] = DIMS[o.kind] || [1, 1, 1];
+  const geo = o.kind === 'vase' ? new THREE.CylinderGeometry(0.3, 0.22, h, 16) : new THREE.BoxGeometry(w, h, d);
+  const mesh = new THREE.Mesh(geo, matte(COLORS[o.color] || 0x888888, o.kind === 'keycard' ? { emissive: 0x1d3a66 } : {}));
+  const l = label(o.id, 0.5); l.position.set(0, h / 2 + 0.7, 0); mesh.add(l);
+  mesh.userData = { h, target: new THREE.Vector3(), visible: true };
+  scene.add(mesh); objMeshes[o.id] = mesh; return mesh;
+}
+
+function makeRobot() {
+  const g = new THREE.Group(); const m = (geo, mat, x, y, z, p = g) => { const o = new THREE.Mesh(geo, mat); o.position.set(x, y, z); p.add(o); return o; };
+  const body = matte(0x3dd6c6, { emissive: 0x0b3a35 }), dk = matte(0x1f2d38);
+  m(new THREE.CylinderGeometry(1.0, 1.1, 0.4, 24), dk, 0, 0.35, 0);
+  for (const [x, z] of [[-0.9, -0.5], [0.9, -0.5], [-0.9, 0.5], [0.9, 0.5]]) { const w = m(new THREE.CylinderGeometry(0.28, 0.28, 0.2, 16), matte(0x0a0f14), x, 0.28, z); w.rotation.z = Math.PI / 2; }
+  const torso = m(new THREE.BoxGeometry(0.9, 1.1, 0.9), body, 0, 1.2, 0);
+  m(new THREE.BoxGeometry(0.5, 0.15, 0.1), matte(0xffffff, { emissive: 0xffffff }), 0, 1.55, 0.46); // "eyes"
+  const shoulder = new THREE.Group(); shoulder.position.set(0, 1.6, 0.35); g.add(shoulder);
+  m(new THREE.BoxGeometry(0.22, 0.22, 1.2), matte(0xcfe9e6), 0, 0, 0.6, shoulder);
+  const fore = new THREE.Group(); fore.position.set(0, 0, 1.2); shoulder.add(fore);
+  m(new THREE.BoxGeometry(0.18, 0.18, 1.0), matte(0xa7d3ce), 0, 0, 0.5, fore);
+  const grip = new THREE.Group(); grip.position.set(0, 0, 1.0); fore.add(grip);
+  m(new THREE.BoxGeometry(0.5, 0.12, 0.2), dk, 0, 0, 0, grip);
+  const halo = new THREE.Mesh(new THREE.RingGeometry(1.5, 1.75, 40), new THREE.MeshBasicMaterial({ color: 0x5fd68a, transparent: true, opacity: 0, side: THREE.DoubleSide }));
+  halo.rotation.x = -Math.PI / 2; halo.position.y = 0.1; g.add(halo);
+  g.userData = { shoulder, fore, grip, halo, reach: 0, heading: 0, body };
+  staticGroup.add(g); return g;
+}
+
+/* ---------- state application ---------- */
+const doorColor = { open: 0x5fd68a, closed: 0xffb454, locked: 0xff5c6c };
+function applySnapshot(s, moveRobot = true) {
+  lastSnap = s; $('clock').textContent = s.t.toFixed(0);
+  for (const d of s.doors) {
+    const m = doorMeshes[d.id]; if (!m) continue;
+    m.material.color.setHex(doorColor[d.state]); m.material.emissive.setHex(d.state === 'locked' ? 0x3a0a10 : 0x101810);
+    m.userData.targetY = d.state === 'open' ? 3.6 : m.userData.baseY; m.material.opacity = d.state === 'open' ? 0.3 : 0.9;
+  }
+  for (const c of s.containers) {
+    const g = contMeshes[c.id]; if (!g) continue;
+    g.userData.open = c.state !== 'closed';
+  }
+  const slot = {};
+  for (const o of s.objects) {
+    const mesh = objMeshes[o.id] || makeObject(o);
+    mesh.userData.held = o.held; mesh.userData.broken = o.broken;
+    if (o.held) { mesh.userData.visible = true; continue; }
+    if (o.container) {
+      const c = s.containers.find(x => x.id === o.container), n = slot[o.container] = (slot[o.container] || 0) + 1;
+      const off = ((n - 1) % 3 - 1) * 0.85;
+      mesh.userData.target.copy(P(c.x, c.y, SURF[c.kind] + mesh.userData.h / 2)).add(new THREE.Vector3(off, 0, ((n - 1) / 3 | 0) * 0.5));
+      mesh.userData.visible = c.state !== 'closed';
+    } else { mesh.userData.target.copy(P(o.x, o.y, mesh.userData.h / 2 + (o.broken ? -0.2 : 0))); mesh.userData.visible = true; }
+    if (o.broken) { mesh.material.color.setHex(0xff5c6c); mesh.rotation.z = 1.2; }
+  }
+  if (robot && moveRobot && !motion) { robot.position.copy(P(s.robot.x, s.robot.y, 0)); }
+}
+
+/* ---------- animation ---------- */
+let motion = null;   // {t0, dur, update(p), onApply?, applied}
+const ease = p => p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2;
+function finishMotion() { if (motion) { motion.update(1); if (!motion.applied) { applySnapshot(motion.snap); } motion = null; } }
+function flash(status) {
+  if (!robot) return; const h = robot.userData.halo;
+  h.material.color.setHex(status === 'success' ? 0x5fd68a : status === 'failure' ? 0xff5c6c : 0x6b8294);
+  h.userData = { t0: performance.now() };
+}
+function faceTo(x, y) { const dx = x - (robot.position.x + 30), dz = y - (robot.position.z + 14); if (Math.hypot(dx, dz) > 0.05) robot.userData.heading = Math.atan2(dx, dz); }
+function targetPos(name) {
+  if (!lastSnap) return null;
+  const c = lastSnap.containers.find(x => x.id === name) || lastSnap.doors.find(x => x.id === name) || lastSnap.objects.find(x => x.id === name);
+  if (!c) return null;
+  if (c.container) { const cc = lastSnap.containers.find(x => x.id === c.container); return cc ? [cc.x, cc.y] : null; }
+  return [c.x, c.y];
+}
+
+function onTool(m) {
+  finishMotion();
+  const verdict = m.result && m.result.verdict ? m.result.verdict.status : null;
+  const e = (m.anim || [])[0];
+  if (!m.physical || !e) { applySnapshot(m.snapshot); if (verdict) flash(verdict); return; }
+  const dur = m.duration * 1000;
+  if (e.kind === 'navigate') {
+    const pts = e.path.map(([x, y]) => P(x, y)); const segs = []; let total = 0;
+    for (let i = 1; i < pts.length; i++) { const l = pts[i].distanceTo(pts[i - 1]); segs.push(l); total += l; }
+    motion = { t0: performance.now(), dur, snap: m.snapshot, update(p) {
+      let d = ease(p) * total, i = 0; while (i < segs.length - 1 && d > segs[i]) { d -= segs[i]; i++; }
+      if (!segs.length) return; const f = segs[i] ? Math.min(d / segs[i], 1) : 1;
+      robot.position.lerpVectors(pts[i], pts[i + 1], f);
+      const dx = pts[i + 1].x - pts[i].x, dz = pts[i + 1].z - pts[i].z; if (Math.hypot(dx, dz) > 0.01) robot.userData.heading = Math.atan2(dx, dz);
+      if (p >= 1) { applySnapshot(m.snapshot); motion.applied = true; flash(verdict); }
+    } };
+  } else {
+    const t = targetPos(m.input.object || m.input.target); if (t) faceTo(...t);
+    motion = { t0: performance.now(), dur, snap: m.snapshot, update(p) {
+      robot.userData.reach = Math.sin(Math.min(p, 1) * Math.PI);
+      if (p >= 0.5 && !motion.applied) { applySnapshot(m.snapshot, false); motion.applied = true; }
+      if (p >= 1) { robot.userData.reach = 0; flash(verdict); }
+    } };
+  }
+}
+
+/* ---------- render loop ---------- */
+const clock = new THREE.Clock();
+const tmp = new THREE.Vector3();
+function tick() {
+  requestAnimationFrame(tick); controls.update();
+  const now = performance.now();
+  if (motion) { const p = (now - motion.t0) / motion.dur; motion.update(Math.min(p, 1)); if (p >= 1) motion = null; }
+  for (const m of Object.values(doorMeshes)) m.position.y += (m.userData.targetY - m.position.y) * 0.12;
+  for (const g of Object.values(contMeshes)) {
+    const o = g.userData.open ? 1 : 0, ud = g.userData;
+    if (ud.parts.lid) ud.parts.lid.rotation.x += ((o ? -1.5 : 0) - ud.parts.lid.rotation.x) * 0.15;
+    if (ud.parts.door) ud.parts.door.rotation.y += ((o ? -1.6 : 0) - ud.parts.door.rotation.y) * 0.15;
+  }
+  if (robot) {
+    const u = robot.userData;
+    let dh = u.heading - robot.rotation.y; dh = Math.atan2(Math.sin(dh), Math.cos(dh)); robot.rotation.y += dh * 0.25;
+    u.shoulder.rotation.x += ((-0.25 + 1.0 * u.reach) - u.shoulder.rotation.x) * 0.3; u.fore.rotation.x += ((0.7 - 0.5 * u.reach) - u.fore.rotation.x) * 0.3;
+    if (u.halo.userData && u.halo.userData.t0) { const k = (now - u.halo.userData.t0) / 900; u.halo.material.opacity = Math.max(0, 0.9 * (1 - k)); u.halo.scale.setScalar(1 + k * 0.6); if (k > 1) u.halo.userData.t0 = 0; }
+  }
+  for (const m of Object.values(objMeshes)) {
+    if (m.userData.held && robot) { robot.userData.grip.getWorldPosition(tmp); tmp.y -= m.userData.h / 2 + 0.1; m.position.copy(tmp); m.visible = true; m.rotation.z = 0; }
+    else { m.position.lerp(m.userData.target, 0.25); m.visible = m.userData.visible !== false; }
+  }
+  renderer.render(scene, camera);
+}
+function resize() { const w = view.clientWidth, h = view.clientHeight; renderer.setSize(w, h); camera.aspect = w / h; camera.updateProjectionMatrix(); }
+addEventListener('resize', resize); resize(); tick();
+$('vIso').onclick = () => setCam([0, 74, 50]); $('vTop').onclick = () => setCam([0, 100, 0.01]);
+
+/* ---------- UI ---------- */
+let ws, models = [], tasks = [], running = false;
+const esc = s => String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+function toast(text, cls = '', ms = 5000) { const t = $('toast'); t.textContent = text; t.className = cls; t.style.display = 'block'; clearTimeout(toast.h); toast.h = setTimeout(() => t.style.display = 'none', ms); }
+function log(cls, html) { const d = document.createElement('div'); d.className = 'm ' + cls; d.innerHTML = html; $('log').appendChild(d); $('log').scrollTop = 1e9; }
+function setRunning(r) { running = r; $('run').disabled = r; $('stop').disabled = !r; }
+
+function fillModels() {
+  const sel = $('model'), keep = sel.value;
+  sel.innerHTML = models.map(m => {
+    const est = m.provider === 'baseline' ? 'free' : m.est_run_usd == null ? 'price n/a' : `~$${m.est_run_usd.toFixed(2)}/run`;
+    return `<option value="${m.id}" ${m.available ? '' : 'disabled'}>${esc(m.label)} · ${est}${m.available ? '' : ' · no key'}</option>`;
+  }).join('');
+  sel.value = keep && [...sel.options].some(o => o.value === keep && !o.disabled) ? keep : (models.find(m => m.id === 'baseline') || models[0]).id;
+  onModel();
+}
+function onModel() {
+  const m = models.find(x => x.id === $('model').value); if (!m) return;
+  $('effort').innerHTML = m.effort ? m.efforts.map(e => `<option ${e === m.default_effort ? 'selected' : ''}>${e}</option>`).join('') : '<option value="">n/a</option>';
+  $('effort').disabled = !m.effort;
+  const price = m.in_per_mtok == null ? '' : ` $${m.in_per_mtok}/$${m.out_per_mtok} per M tok in/out.`;
+  $('modelNote').innerHTML = esc((m.note || '') + price) + (m.verified ? '' : ' <span class="warn">price/id unverified</span>');
+}
+function fillTasks() {
+  $('task').innerHTML = '<option value="">(custom instruction)</option>' + tasks.map(t => `<option value="${t.id}">${t.level} · ${esc(t.instruction)}${t.has_goals ? '' : ' (needs a model)'}</option>`).join('');
+  $('task').selectedIndex = 1; onTask();
+}
+function onTask() { const t = tasks.find(x => x.id === $('task').value); if (t) $('instr').value = t.instruction; }
+$('model').onchange = onModel; $('task').onchange = onTask;
+
+function setUsage(u) {
+  if (!u) return;
+  $('cIn').textContent = u.tokens_in.toLocaleString(); $('cOut').textContent = u.tokens_out.toLocaleString(); $('cCache').textContent = u.cache_read.toLocaleString();
+  $('cUsd').textContent = u.cost_usd == null ? 'n/a' : '$' + u.cost_usd.toFixed(3);
+}
+function renderPlan(steps) {
+  const ic = { todo: '○', doing: '◐', done: '✓', blocked: '✗' };
+  $('plan').innerHTML = steps.length ? steps.map(s => `<div class="${s.status}"><span class="st">${ic[s.status] || '○'}</span><span class="tx">${esc(s.text)}</span></div>`).join('') : '(no plan yet)';
+}
+function renderVerdict(res) {
+  const v = res && res.verdict, el = $('verdict');
+  if (!v) { el.className = ''; el.innerHTML = res && res.error ? `<span class="s" style="color:var(--bad)">error</span> ${esc(res.error)}` : '–'; return; }
+  el.className = v.status;
+  el.innerHTML = `<div class="s">${v.status.toUpperCase()}</div>` + (v.evidence || []).map(e => `<div>· ${esc(e)}</div>`).join('') + (v.failure_reason ? `<div style="color:var(--warn)">why: ${esc(v.failure_reason)}</div>` : '');
+}
+
+function handle(m) {
+  switch (m.type) {
+    case 'hello':
+      models = m.models; tasks = m.tasks; rooms = m.static.rooms;
+      fillModels(); if (!$('task').options.length) fillTasks();
+      clearWorld(); buildStatic(m.snapshot); lastSnap = null; motion = null; applySnapshot(m.snapshot);
+      for (const o of Object.values(objMeshes)) o.position.copy(o.userData.target);
+      renderPlan([]); renderVerdict(null); $('brief').textContent = '–'; setUsage({ tokens_in: 0, tokens_out: 0, cache_read: 0, cost_usd: 0 }); $('log').innerHTML = ''; $('hmodel').textContent = 'idle'; setRunning(false);
+      if (m.running && m.run) { setRunning(true); $('hmodel').textContent = m.run.model; log('task', '▶ ' + esc(m.run.instruction) + '  (joined mid-run)'); }
+      break;
+    case 'started': setRunning(true); $('hmodel').textContent = m.model; log('task', '▶ ' + esc(m.instruction)); setUsage(m.usage); break;
+    case 'thought': log('thought', esc(m.text)); break;
+    case 'plan': renderPlan(m.steps); break;
+    case 'scene': $('brief').textContent = m.brief; break;
+    case 'tool': {
+      setUsage(m.usage); renderVerdict(m.result);
+      const v = m.result.verdict, bad = (v && v.status === 'failure') || m.result.ok === false;
+      const tail = v ? `${v.status}${v.failure_reason ? ' — ' + v.failure_reason : ''}` : (m.result.error || (m.name === 'query_user' ? m.result.user_reply : 'ok'));
+      if (m.name !== 'update_plan') log('tool' + (bad ? ' bad' : ''), `<b>${m.name}</b> ${esc(JSON.stringify(m.input))}<div class="res">${esc(tail)}</div>`);
+      onTool(m); break;
+    }
+    case 'result': setUsage(m.usage); setRunning(false);
+      log('done', '■ ' + esc(m.final || 'finished') + (m.ok === undefined ? '' : m.ok ? '  ✓ ground truth: SUCCESS' : '  ✗ ground truth: FAILED'));
+      toast(m.ok === undefined ? 'Finished' : m.ok ? 'Task succeeded (ground truth)' : 'Task failed (ground truth)', m.ok === false ? 'bad' : 'ok'); break;
+    case 'error': setRunning(false); setUsage(m.usage); log('err', esc(m.message)); toast(m.message, 'bad', 9000); break;
+    case 'stopped': setRunning(false); setUsage(m.usage); log('err', 'stopped'); break;
+  }
+}
+
+function connect() {
+  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+  ws.onmessage = e => handle(JSON.parse(e.data));
+  ws.onclose = () => { toast('connection lost, retrying…', 'bad'); setTimeout(connect, 1500); };
+}
+const send = o => ws.readyState === 1 && ws.send(JSON.stringify(o));
+$('run').onclick = () => send({ type: 'start', model: $('model').value, effort: $('effort').value, budget_usd: +$('budget').value, task_id: $('task').value, instruction: $('instr').value,
+  seed: +$('seed').value, speed: +$('speed').value, false_success: +$('fs').value / 100, use_evaluator: $('useEval').checked });
+$('stop').onclick = () => send({ type: 'stop' });
+$('reset').onclick = () => send({ type: 'reset', seed: +$('seed').value });
+connect();
+</script>
+</body>
+</html>

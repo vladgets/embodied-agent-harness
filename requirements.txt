@@ -1,0 +1,5 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+anthropic>=0.40
+pytest>=8
+openai>=1.50
