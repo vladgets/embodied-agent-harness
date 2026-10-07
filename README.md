@@ -27,6 +27,9 @@ implementation of those two ideas plus measurement around them. It is not their 
 | Evals | `scout/warehouse/evals.py` | Tasks x configs x seeds, judged on ground truth, resumable, hard spend caps |
 | 3D console | `web/warehouse.html`, `scout/warehouse/server.py` | Three.js viewer, model picker, live plan, verdicts, scene graph, cost meter |
 
+**How it works:** see [docs/DESIGN.md](docs/DESIGN.md) for the architecture, information boundaries,
+design decisions, and known limitations.
+
 ## Quick start
 
 ```bash
