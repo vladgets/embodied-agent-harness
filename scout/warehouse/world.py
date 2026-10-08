@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 import random
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable
 
 # room -> (x0, y0, x1, y1)
@@ -68,6 +68,9 @@ class Robot:
     y: float = 5.0
     battery: float = 100.0
     holding: str | None = None
+    # Observable manipulation state, written by the policy backend: arm extension 0..1, whether the
+    # gripper is closed, and "effect" 0..1 (lift for pick, release for place, opening for open).
+    manip: dict = field(default_factory=lambda: {"mode": "idle", "arm_ext": 0.0, "gripper_closed": False, "effect": 0.0})
 
 
 def dist(a: tuple[float, float], b: tuple[float, float]) -> float:
@@ -219,22 +222,61 @@ class Warehouse:
         self.log.append({"t": self.t, "kind": "navigate", "path": path, "room": r.room})
         return {"executed": True}
 
+    # ---- manipulation physics, shared by every skill backend ----
+    def open_ok(self, target: str) -> bool:
+        """Would opening `target` actually work right now?"""
+        r = self.robot
+        if r.battery <= 0:
+            return False
+        if target in self.doors:
+            d = self.doors[target]
+            return (r.room in (d.a, d.b) and self._near(d.x, d.y)
+                    and (d.state == "closed" or (d.state == "locked" and r.holding == d.key)))
+        c = self.containers[target]
+        return r.room == c.room and self._near(c.x, c.y) and c.state == "closed"
+
+    def commit_open(self, target: str) -> None:
+        (self.doors[target] if target in self.doors else self.containers[target]).state = "open"
+
+    def pick_ok(self, o: Obj) -> bool:
+        r = self.robot
+        cont = self.containers.get(o.container) if o.container else None
+        return (r.battery > 0 and r.holding is None and not o.held and r.room == o.room
+                and self._near(o.x, o.y) and o.weight <= MAX_PAYLOAD and (cont is None or cont.state != "closed"))
+
+    def commit_pick(self, o: Obj) -> None:
+        self.robot.holding, o.held, o.room, o.container = o.id, True, None, None
+
+    def place_ok(self, o: Obj, target: str) -> bool:
+        r = self.robot
+        if r.battery <= 0 or r.holding != o.id:
+            return False
+        if target in self.containers:
+            c = self.containers[target]
+            return r.room == c.room and self._near(c.x, c.y) and c.state != "closed"
+        return r.room == target
+
+    def commit_place(self, o: Obj, target: str, dropped: bool = False) -> None:
+        r = self.robot
+        if target in self.containers:
+            c = self.containers[target]
+            if dropped:
+                o.broken, o.room, o.x, o.y, o.container = True, r.room, r.x, r.y, None
+            else:
+                o.room, o.x, o.y, o.container = c.room, c.x, c.y, c.id
+        else:
+            o.room, o.x, o.y, o.container = r.room, r.x, r.y, None
+        o.held, r.holding = False, None
+
+    # ---- scripted skills: instant, with a fixed failure probability ----
     def _s_open(self, target: str) -> dict:
         if target not in self.doors and target not in self.containers:
             return {"error": f"unknown target '{target}'"}
         self._spend(0.3, 2.0)
-        r = self.robot
-        if r.battery <= 0:
+        if self.robot.battery <= 0:
             return {"executed": True}
-        if target in self.doors:
-            d = self.doors[target]
-            if r.room in (d.a, d.b) and self._near(d.x, d.y):
-                if d.state == "closed" or (d.state == "locked" and r.holding == d.key):
-                    d.state = "open"
-        else:
-            c = self.containers[target]
-            if r.room == c.room and self._near(c.x, c.y) and c.state == "closed":
-                c.state = "open"
+        if self.open_ok(target):
+            self.commit_open(target)
         self.log.append({"t": self.t, "kind": "open", "target": target})
         return {"executed": True}
 
@@ -243,14 +285,10 @@ class Warehouse:
         if o is None:
             return {"error": f"unknown object '{object}'"}
         self._spend(0.5, 4.0)
-        r = self.robot
-        cont = self.containers.get(o.container) if o.container else None
-        ok = (r.battery > 0 and r.holding is None and not o.held and r.room == o.room
-              and self._near(o.x, o.y) and o.weight <= MAX_PAYLOAD
-              and (cont is None or cont.state != "closed"))
+        ok = self.pick_ok(o)
         slipped = ok and self.rng.random() < self.slip_p
         if ok and not slipped:
-            r.holding, o.held, o.room, o.container = o.id, True, None, None
+            self.commit_pick(o)
         self.log.append({"t": self.t, "kind": "pick", "object": object, "ok": ok and not slipped})
         return {"executed": True}
 
@@ -260,22 +298,11 @@ class Warehouse:
         if target not in ROOMS and target not in self.containers:
             return {"error": f"unknown target '{target}'"}
         self._spend(0.5, 3.0)
-        r, o = self.robot, self.objects[object]
-        if r.battery <= 0 or r.holding != object:
+        o = self.objects[object]
+        if not self.place_ok(o, target):
             return {"executed": True}
-        if target in self.containers:
-            c = self.containers[target]
-            if not (r.room == c.room and self._near(c.x, c.y) and c.state != "closed"):
-                return {"executed": True}
-            if o.fragile and self.rng.random() < self.drop_p:
-                o.broken, o.room, o.x, o.y, o.container = True, r.room, r.x, r.y, None
-            else:
-                o.room, o.x, o.y, o.container = c.room, c.x, c.y, c.id
-        else:
-            if r.room != target:
-                return {"executed": True}
-            o.room, o.x, o.y, o.container = r.room, r.x, r.y, None
-        o.held, r.holding = False, None
+        dropped = target in self.containers and o.fragile and self.rng.random() < self.drop_p
+        self.commit_place(o, target, dropped)
         self.log.append({"t": self.t, "kind": "place", "object": object, "target": target})
         return {"executed": True}
 
@@ -310,7 +337,8 @@ class Warehouse:
         r = self.robot
         return {
             "t": round(self.t, 1),
-            "robot": {"room": r.room, "x": r.x, "y": r.y, "battery": r.battery, "holding": r.holding},
+            "robot": {"room": r.room, "x": r.x, "y": r.y, "battery": r.battery, "holding": r.holding,
+                      "manip": dict(r.manip)},
             "objects": {o.id: vars(o).copy() for o in self.objects.values()},
             "containers": {c.id: vars(c).copy() for c in self.containers.values()},
             "doors": [vars(d).copy() | {"key": None} for d in self.doors.values()],

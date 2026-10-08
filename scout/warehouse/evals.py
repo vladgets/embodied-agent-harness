@@ -20,6 +20,7 @@ from pathlib import Path
 from statistics import mean
 
 from scout.harness.trace import Trace
+from scout.warehouse.backends import PolicyBackend, ScriptedBackend
 from scout.warehouse.agent import run_task
 from scout.warehouse.embodiment import Embodiment
 from scout.warehouse.evaluator import Evaluator
@@ -54,25 +55,26 @@ def estimate_run_cost(model_id: str, out_per_turn: int = 600) -> float | None:
 
 
 def _key(r: dict) -> tuple:
-    return (r["model"], r.get("effort"), r["config"], r["task"], r["seed"])
+    return (r["model"], r.get("effort"), r.get("variant", "scripted"), r["config"], r["task"], r["seed"])
 
 
 async def run_one(task: Task, cname: str, cfg: dict, seed: int, model: str, effort: str | None,
-                  run_budget: float | None, trace_dir: str) -> dict:
+                  run_budget: float | None, trace_dir: str, variant: str = "scripted") -> dict:
     w = Warehouse(seed=seed)
     if task.setup:
         task.setup(w)
+    backend = ScriptedBackend() if variant == "scripted" else PolicyBackend(seed=seed, early_stop=variant == "policy")
     emb = Embodiment(w, Evaluator(false_success_rate=cfg["false_success"], seed=seed),
-                     use_evaluator=cfg["use_evaluator"],
+                     use_evaluator=cfg["use_evaluator"], backend=backend,
                      user_reply=lambda q: "Please do not move heavy items; skip it.")
     planner = make_planner(model, goals=task.goals, effort=effort, budget_usd=run_budget)
 
     async def emit(_):
         pass
 
-    base = {"model": model, "effort": effort, "config": cname, "task": task.id, "seed": seed}
+    base = {"model": model, "effort": effort, "variant": variant, "config": cname, "task": task.id, "seed": seed}
     try:
-        summ = await run_task(task.instruction, emb, planner, Trace(trace_dir, name=f"{model}-{cname}-{task.id}-s{seed}"),
+        summ = await run_task(task.instruction, emb, planner, Trace(trace_dir, name=f"{model}-{variant}-{cname}-{task.id}-s{seed}"),
                               emit, max_turns=task.max_turns)
         ok = task.success(w) and (summ["asked_user"] if task.expects_user_query else True)
         err = None
@@ -85,7 +87,7 @@ async def run_one(task: Task, cname: str, cfg: dict, seed: int, model: str, effo
 
 
 def print_table(rows: list[dict], configs: list[str], task_ids: list[str]) -> None:
-    print(f"\n{'config':<14}" + "".join(f"{i[:13]:>15}" for i in task_ids) + f"{'overall':>10}{'turns':>8}")
+    print(f"\n{'config':<14}" + "".join(f"{i[:13]:>15}" for i in task_ids) + f"{'overall':>10}{'turns':>8}{'sim_s':>8}")
     for c in configs:
         cells, allr = [], []
         for i in task_ids:
@@ -93,7 +95,7 @@ def print_table(rows: list[dict], configs: list[str], task_ids: list[str]) -> No
             allr += r
             cells.append(f"{100 * mean(x['ok'] for x in r):>14.0f}%" if r else f"{'-':>15}")
         if allr:
-            print(f"{c:<14}" + "".join(cells) + f"{100 * mean(x['ok'] for x in allr):>9.0f}%{mean(x['turns'] for x in allr):>8.1f}")
+            print(f"{c:<14}" + "".join(cells) + f"{100 * mean(x['ok'] for x in allr):>9.0f}%{mean(x['turns'] for x in allr):>8.1f}{mean(x['sim_time'] for x in allr):>8.0f}")
 
 
 async def main_async(args) -> int:
@@ -106,12 +108,13 @@ async def main_async(args) -> int:
     results_path.parent.mkdir(parents=True, exist_ok=True)
     done = [json.loads(l) for l in results_path.read_text().splitlines()] if results_path.exists() else []
     done_keys = {_key(r) for r in done}
+    variant = "scripted" if args.backend == "scripted" else ("policy" if not args.no_early_stop else "policy-noearly")
     todo = [(c, t, s) for c in cfgs for t in tasks for s in range(args.seeds)
-            if (args.model, args.effort, c, t.id, s) not in done_keys]
+            if (args.model, args.effort, variant, c, t.id, s) not in done_keys]
 
     per_run = estimate_run_cost(args.model)
     est = None if per_run is None else per_run * len(todo)
-    print(f"model={args.model} effort={args.effort or 'default'} provider={spec.provider}"
+    print(f"model={args.model} effort={args.effort or 'default'} backend={variant} provider={spec.provider}"
           + ("" if spec.verified else "  [UNVERIFIED id/price]"))
     print(f"{len(todo)} runs to do ({len(done_keys)} already done and skipped)")
     if spec.provider != "baseline":
@@ -135,7 +138,7 @@ async def main_async(args) -> int:
             print(f"total budget ${args.budget_usd:.2f} reached; stopping (rerun to resume)")
             break
         try:
-            r = await run_one(t, c, cfgs[c], s, args.model, args.effort, args.run_budget, trace_dir)
+            r = await run_one(t, c, cfgs[c], s, args.model, args.effort, args.run_budget, trace_dir, variant)
         except Exception as e:  # API/auth errors: fail loudly on the first run, keep going afterwards
             if not new:
                 raise
@@ -148,7 +151,7 @@ async def main_async(args) -> int:
         print(f"  {c:<13}{t.id:<20}s{s}  {'ok ' if r['ok'] else 'FAIL'}  turns={r['turns']:<3}"
               + (f" cost=${r['cost_usd']:.3f}" if r["cost_usd"] is not None else "") + (f"  {r['error']}" if r["error"] else ""))
 
-    rows = [r for r in done + new if r["model"] == args.model and r.get("effort") == args.effort]
+    rows = [r for r in done + new if r["model"] == args.model and r.get("effort") == args.effort and r.get("variant", "scripted") == variant]
     print_table(rows, list(cfgs), [t.id for t in tasks])
     print(f"\nspent this session: ${spent:.3f}   results: {results_path}   traces: {trace_dir}")
     return 0
@@ -163,6 +166,10 @@ def main() -> None:
     p.add_argument("--configs", nargs="*", default=["full"], choices=list(CONFIGS))
     p.add_argument("--budget-usd", type=float, default=3.0, help="stop after this much total spend")
     p.add_argument("--run-budget", type=float, default=0.75, help="abort any single run past this spend")
+    p.add_argument("--backend", choices=["scripted", "policy"], default="scripted",
+                   help="policy = VLA-like timed manipulation episodes judged online by the evaluator")
+    p.add_argument("--no-early-stop", action="store_true",
+                   help="policy backend: ignore stall signals and wait for the end or the step budget")
     p.add_argument("--results", default=None)
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--yes", action="store_true", help="confirm spending real money")

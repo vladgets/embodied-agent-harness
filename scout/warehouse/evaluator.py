@@ -16,11 +16,56 @@ from scout.warehouse.world import MAX_PAYLOAD, REACH, ROOMS, dist, plan_doors
 
 PHYSICAL = {"navigate_to", "open", "pick", "place", "charge"}
 
+# Online judging of a long-running skill (policy backend). The evaluator checks at segment boundaries
+# and answers in_progress / success / failure, inferring progress from observations only.
+STALL_CHECKS = 2        # this many consecutive checks without new best progress => stalled
+PROGRESS_EPS = 0.05
+STEP_BUDGET_S = 24.0    # hard cap on one skill run, in simulated seconds
+
+
+def progress_of(tool: str, manip: dict) -> float:
+    """How far along a manipulation looks, from arm extension, gripper state and the effect on the world."""
+    ext, closed, eff = manip.get("arm_ext", 0.0), 1.0 if manip.get("gripper_closed") else 0.0, manip.get("effect", 0.0)
+    if tool == "pick":
+        return 0.4 * ext + 0.3 * closed + 0.3 * eff
+    if tool == "place":
+        return 0.5 * ext + 0.5 * eff
+    return 0.4 * ext + 0.6 * eff  # open
+
+
+class SegmentTracker:
+    """One per skill run. Fed an observation at every segment boundary."""
+
+    def __init__(self, ev: "Evaluator", tool: str, args: dict, before: dict):
+        self.ev, self.tool, self.args, self.before = ev, tool, args, before
+        self.best, self.stalled = 0.0, 0
+
+    def update(self, now: dict, ended: bool = False) -> tuple[str, float, str | None, str | None]:
+        """-> (status, progress, failure_reason, kind) with kind in {None, 'stall', 'ended', 'timeout'}."""
+        ok, _evidence, reason = self.ev.ground_truth(self.tool, self.args, self.before, now)
+        prog = progress_of(self.tool, now["robot"].get("manip") or {})
+        if ok:
+            return "success", 1.0, None, None
+        if prog > self.best + PROGRESS_EPS:
+            self.best, self.stalled = prog, 0
+        else:
+            self.stalled += 1
+        if ended:
+            return "failure", prog, reason, "ended"
+        if now["t"] - self.before["t"] >= STEP_BUDGET_S:
+            return "failure", prog, f"{reason} (no completion within the {STEP_BUDGET_S:.0f}s step budget)", "timeout"
+        if self.stalled >= STALL_CHECKS:
+            return "failure", prog, reason, "stall"
+        return "in_progress", prog, None, None
+
 
 class Evaluator:
     def __init__(self, false_success_rate: float = 0.0, false_failure_rate: float = 0.0, seed: int = 1):
         self.fs, self.ff = false_success_rate, false_failure_rate
         self.rng = random.Random(seed)
+
+    def tracker(self, tool: str, args: dict, before: dict) -> SegmentTracker:
+        return SegmentTracker(self, tool, args, before)
 
     # ---- exact post-condition check ----
     def ground_truth(self, tool: str, args: dict, before: dict, after: dict) -> tuple[bool, list[str], str | None]:
@@ -81,6 +126,8 @@ class Evaluator:
             return False, [f"{t} is still {st}"], f"robot is too far from {t} (reach is {REACH}m)"
         if st == "locked":
             return False, [f"{t} is still locked"], f"{t} is locked and the robot does not hold its key"
+        if (after["robot"].get("manip") or {}).get("mode") == "policy":
+            return False, [f"{t} is still {st}"], f"policy stalled: the arm moved but {t} did not open"
         return False, [f"{t} is still {st}"], f"{t} did not open"
 
     def _pc_pick(self, args, before, after):
@@ -102,6 +149,10 @@ class Evaluator:
         d = dist((r["x"], r["y"]), pos)
         if d > REACH:
             return False, ev + [f"robot is {d:.1f}m from {oid}"], f"robot is too far from {oid} (reach is {REACH}m)"
+        m = r.get("manip") or {}
+        if m.get("mode") == "policy" and not m.get("gripper_closed"):
+            return (False, ev + [f"arm extended {m['arm_ext']:.0%} but the gripper never closed"],
+                    "policy stalled near the object: the arm hovered but the gripper never closed")
         return False, ev + ["gripper closed without lifting"], "grasp slipped: the gripper closed but the object was not lifted"
 
     def _pc_place(self, args, before, after):
@@ -125,6 +176,9 @@ class Evaluator:
                 return False, ev, f"robot is too far from {tgt} (reach is {REACH}m)"
         elif r["room"] != tgt:
             return False, ev, f"robot is in {r['room']}, not {tgt}"
+        m = r.get("manip") or {}
+        if m.get("mode") == "policy":
+            return False, ev + ["the gripper never released"], f"policy stalled over {tgt}: the object was never released"
         return False, ev, "placement did not complete"
 
     def _pc_charge(self, args, before, after):

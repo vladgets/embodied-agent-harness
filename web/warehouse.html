@@ -55,6 +55,8 @@
       <label>Task</label><select id="task"></select>
       <label>Instruction</label><textarea id="instr"></textarea>
       <div class="row"><div><label>Seed</label><input type="number" id="seed" value="0" min="0"></div><div><label>Evaluator false-success %</label><input type="number" id="fs" value="0" min="0" max="100" step="5"></div></div>
+      <label>Skill backend</label><select id="backend"><option value="scripted">scripted (instant, fixed failure odds)</option><option value="policy">policy (VLA-like: timed episodes, no done signal)</option></select>
+      <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="earlyStop" checked style="width:auto"> evaluator stops a stalled action early (policy only)</label>
       <label>Playback speed (1× = real time)</label><select id="speed"><option value="1">1× real time</option><option value="2" selected>2×</option><option value="4">4×</option><option value="8">8×</option></select>
       <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="useEval" checked style="width:auto"> evaluator on (off = open-loop ablation)</label>
       <div class="row" style="margin-top:10px"><button class="btn" id="run">Run</button><button class="btn sec2" id="stop" disabled>Stop</button><button class="btn sec2" id="reset">Reset</button></div>
@@ -273,6 +275,14 @@ function onTool(m) {
       const dx = pts[i + 1].x - pts[i].x, dz = pts[i + 1].z - pts[i].z; if (Math.hypot(dx, dz) > 0.01) robot.userData.heading = Math.atan2(dx, dz);
       if (p >= 1) { applySnapshot(m.snapshot); motion.applied = true; flash(verdict); }
     } };
+  } else if (e.frames && e.frames.length > 1) {
+    const t = targetPos(m.input.object || m.input.target); if (t) faceTo(...t);
+    const fr = e.frames, last = fr.length - 1;
+    motion = { t0: performance.now(), dur, snap: m.snapshot, update(p) {
+      const f = fr[Math.min(last, Math.floor(Math.min(p, 1) * last))];
+      robot.userData.reach = f.arm_ext; robot.userData.gripClosed = f.gripper_closed ? 1 : 0;
+      if (p >= 1) { applySnapshot(m.snapshot, false); motion.applied = true; robot.userData.reach = 0; robot.userData.gripClosed = 0; flash(verdict); }
+    } };
   } else {
     const t = targetPos(m.input.object || m.input.target); if (t) faceTo(...t);
     motion = { t0: performance.now(), dur, snap: m.snapshot, update(p) {
@@ -299,6 +309,7 @@ function tick() {
   if (robot) {
     const u = robot.userData;
     let dh = u.heading - robot.rotation.y; dh = Math.atan2(Math.sin(dh), Math.cos(dh)); robot.rotation.y += dh * 0.25;
+    u.grip.scale.x += ((1 - 0.55 * (u.gripClosed || 0)) - u.grip.scale.x) * 0.3;
     u.shoulder.rotation.x += ((-0.25 + 1.0 * u.reach) - u.shoulder.rotation.x) * 0.3; u.fore.rotation.x += ((0.7 - 0.5 * u.reach) - u.fore.rotation.x) * 0.3;
     if (u.halo.userData && u.halo.userData.t0) { const k = (now - u.halo.userData.t0) / 900; u.halo.material.opacity = Math.max(0, 0.9 * (1 - k)); u.halo.scale.setScalar(1 + k * 0.6); if (k > 1) u.halo.userData.t0 = 0; }
   }
@@ -355,7 +366,8 @@ function renderVerdict(res) {
   const v = res && res.verdict, el = $('verdict');
   if (!v) { el.className = ''; el.innerHTML = res && res.error ? `<span class="s" style="color:var(--bad)">error</span> ${esc(res.error)}` : '–'; return; }
   el.className = v.status;
-  el.innerHTML = `<div class="s">${v.status.toUpperCase()}</div>` + (v.evidence || []).map(e => `<div>· ${esc(e)}</div>`).join('') + (v.failure_reason ? `<div style="color:var(--warn)">why: ${esc(v.failure_reason)}</div>` : '');
+  const seg = res.segments ? `<div style="margin:3px 0">evaluator checks: ${res.segments.map(s => `<span title="t=${s.t}s: ${s.status}" style="color:${s.status === 'success' ? 'var(--ok)' : s.status === 'failure' ? 'var(--bad)' : 'var(--dim)'}">${s.status === 'success' ? '✓' : s.status === 'failure' ? '✗' : '●'}</span>`).join(' ')} <span class="small">· ${res.duration_s}s</span></div>` : '';
+  el.innerHTML = `<div class="s">${v.status.toUpperCase()}</div>${seg}` + (v.evidence || []).map(e => `<div>· ${esc(e)}</div>`).join('') + (v.failure_reason ? `<div style="color:var(--warn)">why: ${esc(v.failure_reason)}</div>` : '');
 }
 
 function handle(m) {
@@ -396,7 +408,7 @@ function connect() {
 }
 const send = o => ws.readyState === 1 && ws.send(JSON.stringify(o));
 $('run').onclick = () => send({ type: 'start', model: $('model').value, effort: $('effort').value, budget_usd: +$('budget').value, task_id: $('task').value, instruction: $('instr').value,
-  seed: +$('seed').value, speed: +$('speed').value, false_success: +$('fs').value / 100, use_evaluator: $('useEval').checked });
+  seed: +$('seed').value, speed: +$('speed').value, backend: $('backend').value, early_stop: $('earlyStop').checked, false_success: +$('fs').value / 100, use_evaluator: $('useEval').checked });
 $('stop').onclick = () => send({ type: 'stop' });
 $('reset').onclick = () => send({ type: 'reset', seed: +$('seed').value });
 connect();

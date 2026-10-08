@@ -7,7 +7,8 @@ from __future__ import annotations
 
 from typing import Callable
 
-from scout.warehouse.evaluator import PHYSICAL, Evaluator
+from scout.warehouse.backends import ScriptedBackend
+from scout.warehouse.evaluator import PHYSICAL, STALL_CHECKS, Evaluator
 from scout.warehouse.scene_graph import SceneGraph
 from scout.warehouse.world import Warehouse
 
@@ -68,8 +69,9 @@ UserReply = Callable[[str], str]
 
 class Embodiment:
     def __init__(self, world: Warehouse, evaluator: Evaluator | None = None, *, use_evaluator: bool = True,
-                 use_scene_graph: bool = True, user_reply: UserReply | None = None):
+                 use_scene_graph: bool = True, user_reply: UserReply | None = None, backend=None):
         self.world = world
+        self.backend = backend or ScriptedBackend()
         self.evaluator = evaluator or Evaluator()
         self.graph = SceneGraph()
         self.use_evaluator, self.use_scene_graph = use_evaluator, use_scene_graph
@@ -118,9 +120,9 @@ class Embodiment:
         args = dict(args)
         step = args.pop("step", None)
         before = self.world.eval_view()
-        raw = self.world.skill(name, args)
-        if "error" in raw:
-            return {"ok": False, "error": raw["error"]}
+        run = self.backend.run(self.world, name, args, self.evaluator, before)
+        if "error" in run.raw:
+            return {"ok": False, "error": run.raw["error"]}
         after = self.world.eval_view()
 
         truth_ok, _, _ = self.evaluator.ground_truth(name, args, before, after)
@@ -142,4 +144,13 @@ class Embodiment:
         if believed_ok:
             self.graph.update_from_outcome(name, args)
         self.graph.update_from_view(self.world.view())  # perception refresh runs every turn
-        return {"ok": True, "executed": True, "verdict": verdict, "_truth_ok": truth_ok}
+        out = {"ok": True, "executed": True, "verdict": verdict, "_truth_ok": truth_ok}
+        if run.checks:  # long-running (policy) skills report how the supervised run went
+            out["duration_s"] = round(run.duration, 1)
+            out["segments"] = [{"t": c["t"], "status": c["status"]} for c in run.checks]
+            if verdict["status"] == "failure":
+                if run.stopped == "timeout":
+                    verdict["failure_reason"] = f"{verdict['failure_reason']} (ran the full {run.duration:.0f}s step budget without finishing)"
+                elif run.stopped == "stall":
+                    verdict["evidence"] = verdict["evidence"] + [f"stopped early after {run.duration:.0f}s: no progress over the last {STALL_CHECKS} checks"]
+        return out

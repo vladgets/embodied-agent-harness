@@ -17,6 +17,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, PlainTextResponse
 
 from scout.harness.trace import Trace
+from scout.warehouse.backends import PolicyBackend, ScriptedBackend
 from scout.warehouse.agent import run_task
 from scout.warehouse.embodiment import Embodiment
 from scout.warehouse.evaluator import Evaluator
@@ -127,15 +128,18 @@ class Hub:
                 raise ValueError("The scripted baseline only runs the preset tasks that have goals (L1–L6).")
             if not spec.available():
                 raise ValueError(f"No API key set for {spec.provider}.")
-            emb = Embodiment(w, Evaluator(false_success_rate=float(msg.get("false_success", 0)), seed=int(msg.get("seed", 0))),
-                             use_evaluator=bool(msg.get("use_evaluator", True)),
+            seed = int(msg.get("seed", 0))
+            backend = (PolicyBackend(seed=seed, early_stop=bool(msg.get("early_stop", True)))
+                       if msg.get("backend") == "policy" else ScriptedBackend())
+            emb = Embodiment(w, Evaluator(false_success_rate=float(msg.get("false_success", 0)), seed=seed),
+                             use_evaluator=bool(msg.get("use_evaluator", True)), backend=backend,
                              user_reply=lambda q: "Operator: no preference. Do not move heavy items; use your best judgment.")
             self.planner = make_planner(model, goals=task.goals if task else None,
                                         effort=msg.get("effort") or None,
                                         budget_usd=run_budget(msg.get("budget_usd")) if spec.provider != "baseline" else None)
             playback = max(0.5, min(float(msg.get("speed") or PLAYBACK), 16.0))
             state = {"log": 0, "t": w.t}
-            self.run_info = {"model": model, "instruction": instruction}
+            self.run_info = {"model": model, "instruction": instruction, "backend": backend.name}
             await self.broadcast({"type": "started", "instruction": instruction, "model": model,
                                   "snapshot": snapshot(w), "usage": self.usage_msg()})
 

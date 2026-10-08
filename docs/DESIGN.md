@@ -46,6 +46,7 @@ flowchart LR
 
 | Layer | Files | Responsibility |
 |---|---|---|
+| Skill backends | `scout/warehouse/backends.py` | How physical skills run: scripted (instant) or a VLA-like timed policy supervised online by the evaluator |
 | World (ground truth) | `scout/warehouse/world.py` | Rooms, doors, containers, objects, robot, battery, stochastic failures. The agent never reads it directly |
 | Embodiment | `scout/warehouse/embodiment.py` | The tool registry and the execution pipeline: skill, then evaluator, then gated scene-graph update |
 | Evaluator | `scout/warehouse/evaluator.py` | Judges every physical action against its post-condition and explains failures |
@@ -236,6 +237,50 @@ reported as "price n/a" instead of guessed. Local overrides go in an untracked `
   `MAX_TOTAL_SPEND_USD` refuses paid runs once the process has spent that much.
 - A viewer that joins mid-run is told a task is running, so its Run and Stop buttons are correct.
 
+## 7b. Skill backends: scripted and VLA-like
+
+Underneath the tools, *how a physical skill actually runs* is pluggable (`scout/warehouse/backends.py`).
+The agent loop, evaluator and scene graph are identical for both backends.
+
+| | `ScriptedBackend` (default) | `PolicyBackend` (VLA-like) |
+|---|---|---|
+| Timing | Instant | A timed episode; action chunks every 0.5 s of simulated time |
+| Success signal | Returns `executed` only | Returns nothing; the policy acts until it ends, stalls, or is cut off |
+| Failure odds | Fixed probability | Depend on the situation: distance to the object, fragility, weight, preconditions |
+| Judged | Once, after the skill | **Online**, by the evaluator at segment boundaries (every 2 s) |
+| Covers | everything | `pick`, `place`, `open` (navigation and charging stay scripted, like a classical nav stack) |
+
+**This simulates the interface characteristics of a learned manipulation policy, not its quality.**
+The success probabilities (0.80 pick, 0.90 place, 0.95 open, minus penalties) are made up.
+
+An episode is planned up front from the real preconditions, with an outcome the agent and evaluator never
+see: `success`, `silent_miss` (the gripper closes on nothing, the arm retracts as if finished, and the
+policy stops on its own), `drop` (a fragile object released badly), `stall` (the arm hovers and the
+policy never finishes), or `flail` (the preconditions are false, so the motion cannot work). Only
+observable state is exposed: arm extension, whether the gripper is closed, and an "effect" value (lift,
+release, or how far a door has opened).
+
+**Supervision.** The evaluator gets a per-run `SegmentTracker`. At each boundary it re-checks the
+post-condition and infers progress *from observations only*. It answers:
+
+- `success`: the post-condition holds, so stop.
+- `in_progress`: progress improved recently, so keep going.
+- `failure`: the policy ended without success, or **stalled** (no new best progress for two consecutive
+  checks, about 4 s), or exceeded the 24 s step budget.
+
+A stall is cut off early (typically 6 to 8 s in) with a concrete reason such as *"policy stalled near the
+object: the arm hovered but the gripper never closed"*, instead of waiting out the budget. The result the
+agent sees keeps its shape and gains `duration_s` and `segments`; a timeout adds the step-budget note
+to the reason, and an early stop adds evidence saying so. A UI toggle (and `--no-early-stop`) disables
+early stopping so the two modes can be compared.
+
+Properties that are tested: a forced-success episode is never wrongly cut off as a stall (150 seeds,
+zero false failures), episodes are deterministic per seed and always terminate, an infeasible action is
+diagnosed from its preconditions, and the scripted backend's behavior is unchanged.
+
+Not modelled: the evaluator's noise applies to the final verdict, not to the in-flight checks; the robot
+is still idle while the language model decides; and there is no real learned policy.
+
 ## 8. The plan checklist
 
 `update_plan` records an ordered checklist. Models tend to call it once and never again, so progress
@@ -300,7 +345,9 @@ live 3D console, the `step` progress tag, and the baseline planner as a referenc
 - **The evaluator is exact in simulation.** Judging from real sensor data is the hard part this does not
   address.
 - **The agent thinks synchronously**: the robot is idle while the model decides. A real-time harness would
-  keep executing and be interruptible.
+  keep executing and be interruptible. The policy backend makes skills take time, but does not remove this.
+- **The policy backend is a simulation of a policy's interface, not a policy.** Its odds are invented, and
+  in-flight evaluator checks are exact (noise only affects the final verdict).
 - **`query_user` answers are canned**, so the human-in-the-loop behavior is not yet interactive.
 - **Perception is limited to the current room** and positions are exact, with no sensor noise.
 - **No memory across tasks**: every task starts with an empty scene graph.

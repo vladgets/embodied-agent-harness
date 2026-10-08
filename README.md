@@ -22,6 +22,7 @@ implementation of those two ideas plus measurement around them. It is not their 
 | Tools as contracts | `scout/warehouse/embodiment.py` | Descriptions state preconditions, reliability, and what to try on failure |
 | Evaluator ("exit codes") | `scout/warehouse/evaluator.py` | Post-hook after every physical skill. **Reasoning-blind**: sees only the call, the post-condition, and before/after observations. Returns status, evidence, failure reason. Optional noise model |
 | Scene graph | `scout/warehouse/scene_graph.py` | Persistent object memory with staleness and MISSING tracking. Updated by perception, and by action outcomes **only when the evaluator confirms them** |
+| Skill backends | `scout/warehouse/backends.py` | Scripted (instant) or **VLA-like policy**: timed episodes, no done signal, judged online by the evaluator at segment boundaries, with early stop on a stall |
 | Ground-truth world | `scout/warehouse/world.py` | Rooms, locked doors, containers, fragile and heavy objects, battery. Skills return only `executed`, with no success signal (like a VLA policy) |
 | Providers | `scout/warehouse/planners.py` | Claude (Messages API) and OpenAI (Responses API) behind one interface, with usage and cost tracking |
 | Evals | `scout/warehouse/evals.py` | Tasks x configs x seeds, judged on ground truth, resumable, hard spend caps |
@@ -34,7 +35,7 @@ design decisions, and known limitations.
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-.venv/bin/python -m pytest -q                       # 29 tests, no network, no keys
+.venv/bin/python -m pytest -q                       # 46 tests, no network, no keys
 
 .venv/bin/uvicorn scout.warehouse.server:app --port 8001
 # open http://localhost:8001
@@ -62,6 +63,7 @@ Things to try in the console (pick a model, choose "custom instruction"):
 python -m scout.warehouse.evals                                         # free scripted baseline
 python -m scout.warehouse.evals --model claude-sonnet-5-5 --dry-run     # cost estimate, runs nothing
 python -m scout.warehouse.evals --model gpt-5.4-mini --seeds 2 --yes    # real run
+python -m scout.warehouse.evals --backend policy                        # VLA-like skills (add --no-early-stop to compare)
 ```
 
 - Paid models need `--yes`; `--dry-run` prints the estimate first.
